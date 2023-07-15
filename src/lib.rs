@@ -1,5 +1,7 @@
+use ndarray::parallel::prelude::*;
 use ndarray::{array, Array1, ArrayView1, ArrayView2, Axis};
-use std::io;
+
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -54,6 +56,8 @@ pub fn cosine_similarity(x: ArrayView1<f64>, y: ArrayView1<f64>) -> Result<f64, 
 ///     >>> let x = array![1., 2., 3., 4.,];
 ///     >>> let y = array![[1., 2., 3., 4.,], [1., 2., 3., 4.,], [1., 2., 3., 4.,], [1., 2., 3., 4.,]];
 ///     >>> cosine_similarity_bulk(x.view(), y.view());
+/// ### Execution time:
+///     100,000 vectors with 1024 dim, < 2.0 sec.
 
 pub fn cosine_similarity_bulk(x: ArrayView1<f64>, y: ArrayView2<f64>) -> Array1<f64> {
     let mut res: Array1<f64> = Array1::zeros(y.shape()[0]);
@@ -64,6 +68,29 @@ pub fn cosine_similarity_bulk(x: ArrayView1<f64>, y: ArrayView2<f64>) -> Array1<
     }
 
     return res;
+}
+
+/// ### Def.
+///     parrallel version of buld cosine similarity
+/// ### Examples
+///     >>> let x = array![1., 2., 3., 4.,];
+///     >>> let y = array![[1., 2., 3., 4.,], [1., 2., 3., 4.,], [1., 2., 3., 4.,], [1., 2., 3., 4.,]];
+///     >>> cosine_similarity_bulk_parrallel(x.view(), y.view());
+/// ### Execution time:
+///     100,000 vectors with 1024 dim, < 0.3 sec(=300ms).
+pub fn cosine_similarity_bulk_parrallel(x: ArrayView1<f64>, y: ArrayView2<f64>) -> Array1<f64> {
+    let res: Arc<Mutex<Array1<f64>>> = Arc::new(Mutex::new(Array1::zeros(y.shape()[0])));
+
+    y.axis_iter(Axis(0))
+        .into_par_iter()
+        .enumerate()
+        .for_each(|(idx, row)| {
+            let cos_row = cosine_similarity(x.view(), row).unwrap();
+            let mut res = res.lock().unwrap();
+            res[idx] = cos_row; //if res was defined as Array1<f64> type, this line could NOT be compiled.
+        });
+
+    return Arc::try_unwrap(res).unwrap().into_inner().unwrap();
 }
 
 #[cfg(test)]
@@ -120,6 +147,27 @@ mod test_lib {
         cosine_similarity_bulk(source.view(), target.view());
         let duration = start.elapsed();
         assert!(duration.as_secs_f64() < 2.0); // single thread, (10만 개, 1024)에서 2초 넘으면 fail.
-        println!("Execution time: {:.4?}", duration);
+        println!("Execution time for single thread: {:.4?}", duration);
+    }
+
+    #[test]
+    fn test_cosine_similarity_bulk_parralle() {
+        // check logic
+        let source = array![1., 1., 1., 1.];
+        let target = array![[0., 0., 0., 0.], [1., 1., 1., 1.], [-1., -1., -1., -1.],];
+        let result = cosine_similarity_bulk_parrallel(source.view(), target.view());
+        assert_eq!(array![0., 1., -1.], result);
+
+        // check execution time.
+        let n = 100000;
+        let dim = 1024;
+        let source = Array::random(dim, Uniform::new(0., 10.));
+        let target = Array::random((n, dim), Uniform::new(0., 10.));
+
+        let start = Instant::now();
+        cosine_similarity_bulk_parrallel(source.view(), target.view());
+        let duration = start.elapsed();
+        assert!(duration.as_secs_f64() < 0.3); // 10만 개, 1024 dim -> 16 threads 에서 300 ms 넘으면 fail.
+        println!("Execution time for multi thread: {:.4?}", duration);
     }
 }
